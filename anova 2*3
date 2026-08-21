@@ -1,0 +1,160 @@
+import numpy as np
+import pandas as pd
+from scipy.signal import butter, filtfilt, hilbert
+from scipy.ndimage import gaussian_filter1d
+import statsmodels.api as sm
+from statsmodels.formula.api import ols
+
+# Helper functions from previous cells (56ex93DQVV7U) - assuming they are available or defined here for completeness
+def extract_high_gamma(data, fs=1000, lowcut=70, highcut=150):
+    nyq = 0.5 * fs
+    b, a = butter(4, [lowcut / nyq, highcut / nyq], btype='band')
+    filtered_data = filtfilt(b, a, data, axis=-1)
+    analytic_signal = hilbert(filtered_data, axis=-1)
+    high_gamma_power = np.abs(analytic_signal) ** 2
+    return high_gamma_power
+
+def apply_baseline_correction(power_data, time_vec, baseline_window=(-0.2, 0)):
+    baseline_idx = (time_vec >= baseline_window[0]) & (time_vec <= baseline_window[1])
+    bl_mean = np.mean(power_data[:, :, baseline_idx], axis=-1, keepdims=True)
+    bl_std = np.std(power_data[:, :, baseline_idx], axis=-1, keepdims=True) # Corrected: bl_idx changed to baseline_idx
+    bl_std[bl_std == 0] = 1e-8
+    z_scored_power = (power_data - bl_mean) / bl_std
+    return z_scored_power
+
+# ۱. استخراج ویژگی‌های اصلاح‌شده و بدون بایاس
+extracted_features = []
+search_window = (0.1, 0.6) # پنجره ۱۰۰ تا ۶۰۰ میلی‌ثانیه
+
+for subj_id, face_chans in subjects_electrodes.items():
+    dat = alldat[subj_id - 1]
+
+    # چک کردن وجود داده‌های رفتاری key_press در experiment 2 (dat[1])
+    if 'key_press' not in dat[1] or dat[1]['key_press'] is None:
+        print(f"Subject {subj_id} has no key-press data in Experiment 2. Skipping...")
+        continue
+
+    # استخراج متغیرهای مورد نیاز از ساختار داده Neuromatch
+    raw_v_data = dat[1]['V'] # Continuous voltage data (timepoints, channels)
+    t_on = dat[1]['t_on'].flatten() # Stimulus onset times for epoching
+    raw_key_press_times = dat[1]['key_press'].flatten() # Raw timestamps of key presses
+    noise_levels = dat[1]['stim_noise'].flatten() # Noise levels per trial
+    srate = 1000 # Assuming srate is 1000 Hz, consistent with dataset info
+
+    # Define epoch window (e.g., -200ms to +800ms around stimulus onset)
+    pre_stim_ms = 200
+    post_stim_ms = 800
+    pre_stim_samples = int(pre_stim_ms * (srate / 1000))
+    post_stim_samples = int(post_stim_ms * (srate / 1000))
+    epoch_length_samples = pre_stim_samples + post_stim_samples + 1
+
+    n_trials = len(t_on)
+    n_channels = raw_v_data.shape[1]
+
+    # Prepare array for epoched data (trials, channels, timepoints_in_epoch)
+    epoched_v_data = np.zeros((n_trials, n_channels, epoch_length_samples), dtype=raw_v_data.dtype)
+
+    # Epoch the continuous data
+    for i, onset_sample in enumerate(t_on):
+        start_idx = int(onset_sample - pre_stim_samples)
+        end_idx = int(onset_sample + post_stim_samples + 1)
+
+        # Ensure indices are within bounds of raw_v_data
+        if start_idx >= 0 and end_idx <= raw_v_data.shape[0]:
+            epoched_v_data[i, :, :] = raw_v_data[start_idx:end_idx, :].T
+        else:
+            # Handle trials that are too close to the beginning or end of the recording
+            # For now, we'll just zero-pad or skip if needed. It's safer to skip if a full epoch cannot be formed.
+            # For simplicity and to match previous behavior, we'll let `zeros` be in epoched_v_data if condition not met
+            print(f"Warning: Trial {i} for Subject {subj_id} falls out of bounds. This trial might be incomplete.")
+
+
+    # Create a time vector for the epoched data for plotting/analysis
+    time_vec_epoched = np.linspace(-pre_stim_ms / 1000, post_stim_ms / 1000, epoch_length_samples)
+
+    # Create a binary key_presses array (1 if key pressed for trial, 0 otherwise)
+    key_presses_binary = np.zeros(n_trials, dtype=int)
+    for trial_idx, onset_time in enumerate(t_on):
+        response_start = onset_time
+        response_end = onset_time + 1000 # t_off is 1000 samples after t_on for Exp 2
+
+        if np.any((raw_key_press_times >= response_start) & (raw_key_press_times < response_end)):
+            key_presses_binary[trial_idx] = 1
+
+    # استخراج توان High-Gamma و Z-score
+    hg_power = extract_high_gamma(epoched_v_data) # <--- Corrected to use epoched data
+    z_hg_power = apply_baseline_correction(hg_power, time_vec_epoched) # <--- Corrected to use epoched time_vec
+
+    # میانگین‌گیری روی الکترودهای Face-Selective
+    face_power = np.mean(z_hg_power[:, face_chans, :], axis=1) # (n_trials, n_timepoints)
+
+    # هموارسازی برای یافتن دقیق پیک
+    face_power_smoothed = gaussian_filter1d(face_power, sigma=15, axis=-1)
+
+    # ماسک پنجره زمانی
+    time_mask = (time_vec_epoched >= search_window[0]) & (time_vec_epoched <= search_window[1])
+    window_times = time_vec_epoched[time_mask] * 1000  # تبدیل به میلی‌ثانیه
+
+    # استخراج ویژگی برای تک‌تک آزمون‌ها (Trials)
+    for trial_idx in range(face_power_smoothed.shape[0]):
+        trial_signal = face_power_smoothed[trial_idx, time_mask]
+
+        # استخراج Peak Magnitude و Latency
+        if len(trial_signal) == 0: # Handle cases where search_window might be empty for some reason
+            peak_mag = np.nan
+            half_peak_lat = np.nan
+        else:
+            peak_mag = np.max(trial_signal)
+            # Half-Peak Latency (مقاوم در برابر نویز نسبت به Peak مطلق)
+            half_peak_val = peak_mag / 2.0
+            half_peak_indices = np.where(trial_signal >= half_peak_val)[0]
+            half_peak_lat = window_times[half_peak_indices[0]] if len(half_peak_indices) > 0 else window_times[np.argmax(trial_signal)]
+
+        # دسته‌بندی نویز به ۳ سطح: Low (0-30), Medium (35-65), High (70-100)
+        noise_val = noise_levels[trial_idx]
+        if noise_val <= 30:
+            noise_cat = 'Low'
+        elif 35 <= noise_val <= 65:
+            noise_cat = 'Medium'
+        else:
+            noise_cat = 'High'
+
+        perception_stat = 'Perceived' if key_presses_binary[trial_idx] == 1 else 'Non-Perceived'
+
+        extracted_features.append({
+            'Subject': f'Subj_{subj_id}',
+            'Perception': perception_stat,
+            'NoiseLevel': noise_cat,
+            'PeakMagnitude': peak_mag,
+            'HalfPeakLatency': half_peak_lat
+        })
+
+df_clean = pd.DataFrame(extracted_features)
+
+# ۲. اجرای مجدد ANOVA برای Peak Magnitude
+print("="*50)
+print(" 📊 ANOVA: PEAK MAGNITUDE (CLEAN) ")
+print("="*50)
+
+# Clean DataFrame from NaNs in relevant columns for PeakMagnitude ANOVA
+df_mag_clean = df_clean.dropna(subset=['PeakMagnitude', 'Perception', 'NoiseLevel']).copy()
+
+if df_mag_clean.empty:
+    print("Error: DataFrame for PeakMagnitude ANOVA is empty after dropping rows with NaNs. Cannot perform ANOVA.")
+else:
+    model_mag = ols('PeakMagnitude ~ C(Perception) * C(NoiseLevel)', data=df_mag_clean).fit()
+    print(sm.stats.anova_lm(model_mag, typ=2))
+
+# ۳. اجرای مجدد ANOVA برای Half-Peak Latency
+print("\n" + "="*50)
+print(" 📊 ANOVA: HALF-PEAK LATENCY (CLEAN) ")
+print("="*50)
+
+# Clean DataFrame from NaNs in relevant columns for HalfPeakLatency ANOVA
+df_lat_clean = df_clean.dropna(subset=['HalfPeakLatency', 'Perception', 'NoiseLevel']).copy()
+
+if df_lat_clean.empty:
+    print("Error: DataFrame for HalfPeakLatency ANOVA is empty after dropping rows with NaNs. Cannot perform ANOVA.")
+else:
+    model_lat = ols('HalfPeakLatency ~ C(Perception) * C(NoiseLevel)', data=df_lat_clean).fit()
+    print(sm.stats.anova_lm(model_lat, typ=2))
