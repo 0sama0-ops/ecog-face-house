@@ -1,0 +1,94 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import butter, filtfilt, hilbert
+from scipy.ndimage import gaussian_filter1d # Moved import here
+
+def extract_high_gamma(data, fs=1000, lowcut=70, highcut=150):
+    """
+    استخراج پاکت توان High-Gamma از سیگنال خام ECoG
+    data: ماتریس ۳ بعدی به صورت (trials, channels, timepoints)
+    """
+    # طراحی فیلتر باندگذر جهت جداسازی فرکانس‌های 70 تا 150 هرتز
+    nyq = 0.5 * fs
+    b, a = butter(4, [lowcut / nyq, highcut / nyq], btype='band')
+
+    # اعمال فیلتر روی محور زمان
+    filtered_data = filtfilt(b, a, data, axis=-1)
+
+    # محاسبه دامنه لحظه‌ای (Analytic Amplitude / Envelope) با تبدیل هیلبرت
+    analytic_signal = hilbert(filtered_data, axis=-1)
+    high_gamma_power = np.abs(analytic_signal) ** 2  # توان High-Gamma
+
+    return high_gamma_power
+
+def apply_baseline_correction(power_data, time_vec, baseline_window=(-0.2, 0)):
+    """
+    نرمال‌سازی توان به روش Z-score نسبت به پنجره Baseline
+    """
+    baseline_idx = (time_vec >= baseline_window[0]) & (time_vec <= baseline_window[1])
+
+    # میانگین و انحراف معیار در پنجره بیس‌لاین
+    bl_mean = np.mean(power_data[:, :, baseline_idx], axis=-1, keepdims=True)
+    bl_std = np.std(power_data[:, :, baseline_idx], axis=-1, keepdims=True)
+
+    # جلوگیری از تقسیم بر صفر
+    bl_std[bl_std == 0] = 1e-8
+
+    z_scored_power = (power_data - bl_mean) / bl_std
+    return z_scored_power
+
+# ==========================================================
+# پیاده‌سازی روی داده‌های یک سوژه و رسم نمودار مقایسه‌ای
+# ==========================================================
+def plot_perceived_vs_nonperceived(subj_data, key_presses, noise_levels, time_vec, face_channels, subj_id):
+    """
+    رسم پاسخ High-Gamma برای دو حالت Perceived و Non-Perceived در Bins مختلف نویز
+    """
+    # ۱. استخراج High-Gamma Power و Z-scoring
+    hg_power = extract_high_gamma(subj_data)
+    z_hg_power = apply_baseline_correction(hg_power, time_vec)
+
+    # انتخاب فقط کانال‌های Face-Selective و میانگین‌گیری روی کانال‌ها
+    face_power = np.mean(z_hg_power[:, face_channels, :], axis=1) # (trials, timepoints)
+
+    # اعمال smoothing بر روی سیگنال
+    face_power_smooth = gaussian_filter1d(face_power, sigma=15, axis=-1)
+
+    # تعریف سطوح نویز (Bins)
+    noise_bins = [(0, 30), (35, 65), (70, 100)] # Low, Medium (Target), High
+    bin_labels = ['Low Noise (0-30%)', 'Medium Noise (35-65%)', 'High Noise (70-100%)']
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5), sharey=True)
+
+    for i, (n_low, n_high) in enumerate(noise_bins):
+        # ماسک فیلتر کردن براساس سطح نویز
+        noise_mask = (noise_levels >= n_low) & (noise_levels <= n_high)
+
+        # ماسک تفکیک رفتار (Hit / Miss)
+        hit_mask = noise_mask & (key_presses == 1)
+        miss_mask = noise_mask & (key_presses == 0)
+
+        # محاسبه میانگین و خطای استاندارد (SEM) برای Hit
+        if np.sum(hit_mask) > 0:
+            hit_mean = np.mean(face_power_smooth[hit_mask, :], axis=0)
+            hit_sem = np.std(face_power_smooth[hit_mask, :], axis=0) / np.sqrt(np.sum(hit_mask))
+            axes[i].plot(time_vec * 1000, hit_mean, label=f'Perceived / Hit (n={np.sum(hit_mask)})', color='crimson', lw=2)
+            axes[i].fill_between(time_vec * 1000, hit_mean - hit_sem, hit_mean + hit_sem, color='crimson', alpha=0.2)
+
+        # محاسبه میانگین و خطای استاندارد (SEM) برای Miss
+        if np.sum(miss_mask) > 0:
+            miss_mean = np.mean(face_power_smooth[miss_mask, :], axis=0)
+            miss_sem = np.std(face_power_smooth[miss_mask, :], axis=0) / np.sqrt(np.sum(miss_mask))
+            axes[i].plot(time_vec * 1000, miss_mean, label=f'Non-Perceived / Miss (n={np.sum(miss_mask)})', color='navy', lw=2)
+            axes[i].fill_between(time_vec * 1000, miss_mean - miss_sem, miss_mean + miss_sem, color='navy', alpha=0.2)
+
+        axes[i].axvline(0, color='gray', linestyle='--', label='Stimulus Onset')
+        axes[i].set_title(f'{bin_labels[i]}')
+        axes[i].set_xlabel('Time (ms)')
+        axes[i].grid(True, alpha=0.3)
+        axes[i].legend()
+
+    axes[0].set_ylabel('High-Gamma Power (Z-score)')
+    plt.suptitle(f'Subject {subj_id} — High-Gamma Response: Perceived vs Non-Perceived', fontsize=14, y=1.02)
+    plt.tight_layout()
+    plt.show()
