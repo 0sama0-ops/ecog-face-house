@@ -1,0 +1,75 @@
+import numpy as np
+import pandas as pd
+from scipy.signal import butter, filtfilt, hilbert
+from scipy.ndimage import gaussian_filter1d
+
+def extract_unbiased_features(alldat, subjects_electrodes, search_window=(0.1, 0.6)):
+    extracted_features = []
+    
+    for subj_id, face_chans in subjects_electrodes.items():
+        dat = alldat[subj_id - 1]
+        
+        # ۱. بررسی و حذف داده‌های فاقد رفتار
+        if 'key_press' not in dat or dat['key_press'] is None:
+            continue
+            
+        v_data = dat['V'] # (trials, channels, timepoints)
+        key_presses = dat['key_press'].flatten()
+        noise_levels = dat['stim_noise'].flatten()
+        
+        n_timepoints = v_data.shape[-1]
+        time_vec = np.linspace(-0.2, 0.8, n_timepoints)
+        
+        # ۲. استخراج توان High-Gamma (70-150 Hz)
+        nyq = 0.5 * 1000 # Sampling rate = 1000Hz
+        b, a = butter(4, [70 / nyq, 150 / nyq], btype='band')
+        filtered = filtfilt(b, a, v_data, axis=-1)
+        hg_power = np.abs(hilbert(filtered, axis=-1)) ** 2
+        
+        # ۳. Baseline Correction بی‌پایاس (Z-score نسبت به baseline همان trial)
+        bl_idx = (time_vec >= -0.2) & (time_vec <= 0)
+        bl_mean = np.mean(hg_power[:, :, bl_idx], axis=-1, keepdims=True)
+        bl_std = np.std(hg_power[:, :, bl_idx], axis=-1, keepdims=True)
+        bl_std[bl_std == 0] = 1e-8
+        z_hg_power = (hg_power - bl_mean) / bl_std
+        
+        # ۴. میانگین‌گیری فقط روی کانال‌های انتخابی مستخرج از Localizer
+        face_power = np.mean(z_hg_power[:, face_chans, :], axis=1)
+        
+        # ۵. هموارسازی گوسی جهت حذف نویز تک‌کارآزمایی
+        face_power_smoothed = gaussian_filter1d(face_power, sigma=10, axis=-1)
+        
+        time_mask = (time_vec >= search_window[0]) & (time_vec <= search_window[1])
+        window_times = time_vec[time_mask] * 1000
+        
+        for t_idx in range(face_power_smoothed.shape[0]):
+            trial_sig = face_power_smoothed[t_idx, time_mask]
+            
+            # Peak Magnitude
+            peak_mag = np.max(trial_sig)
+            
+            # Half-Peak Latency (مقاوم در برابر نویز نسبت به Peak مطلق)
+            half_peak_val = peak_mag / 2.0
+            half_peak_indices = np.where(trial_sig >= half_peak_val)[0]
+            half_peak_lat = window_times[half_peak_indices[0]] if len(half_peak_indices) > 0 else window_times[np.argmax(trial_sig)]
+            
+            # بسته‌بندی سطوح نویز
+            n_val = noise_levels[t_idx]
+            if n_val <= 30:
+                n_cat = 'Low'
+            elif 35 <= n_val <= 65:
+                n_cat = 'Medium'
+            else:
+                n_cat = 'High'
+                
+            extracted_features.append({
+                'Subject': f'Subj_{subj_id}',
+                'Perception': 'Perceived' if key_presses[t_idx] == 1 else 'Non-Perceived',
+                'NoiseLevel': n_cat,
+                'PeakMagnitude': peak_mag,
+                'HalfPeakLatency': half_peak_lat
+            })
+            
+    return pd.DataFrame(extracted_features)
+
+df_clean = extract_unbiased_features(alldat, subjects_electrodes)
