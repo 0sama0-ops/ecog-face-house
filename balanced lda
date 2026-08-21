@@ -1,0 +1,50 @@
+import numpy as np
+import pandas as pd
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import balanced_accuracy_score, roc_auc_score
+from sklearn.preprocessing import StandardScaler
+
+noise_categories = ['Low', 'Medium', 'High']
+results = []
+
+for n_cat in noise_categories:
+    df_sub = df_clean[df_clean['NoiseLevel'] == n_cat].dropna()
+    
+    X = df_sub[['PeakMagnitude', 'HalfPeakLatency']].values
+    y = (df_sub['Perception'] == 'Perceived').astype(int).values
+    
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    b_accs, aucs = [], []
+    
+    for train_idx, test_idx in cv.split(X, y):
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+        
+        # نرمال‌سازی ویژگی‌ها
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        
+        # مدل LDA با تنظیم وزن کلاس‌ها
+        clf = LinearDiscriminantAnalysis(priors=[0.5, 0.5])
+        clf.fit(X_train_scaled, y_train)
+        
+        y_pred = clf.predict(X_test_scaled)
+        y_prob = clf.predict_proba(X_test_scaled)[:, 1]
+        
+        b_accs.append(balanced_accuracy_score(y_test, y_pred))
+        if len(np.unique(y_test)) > 1:
+            aucs.append(roc_auc_score(y_test, y_prob))
+            
+    results.append({
+        'NoiseLevel': n_cat,
+        'Balanced Accuracy': np.mean(b_accs),
+        'Mean ROC-AUC': np.mean(aucs) if aucs else np.nan
+    })
+
+df_lda_balanced = pd.DataFrame(results)
+print("="*55)
+print(" 🤖 BALANCED LDA DECODING RESULTS ")
+print("="*55)
+print(df_lda_balanced)
