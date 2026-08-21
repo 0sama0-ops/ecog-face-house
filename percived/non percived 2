@@ -1,0 +1,79 @@
+import numpy as np
+# ==========================================================
+# اجرا و استخراج خروجی برای سوژه‌های دارای داده رفتاری
+# ==========================================================
+
+# لیست سوژه‌ها به همراه الکترودهای Face-Selective منتخب
+subjects_electrodes = {
+    1: [0, 25, 30, 35, 39],
+    4: [23, 24],
+    5: [15],
+    6: [6, 9, 15, 16, 17, 23, 24, 25, 30],
+    7: [8, 9, 36, 38, 39]
+}
+
+# فرض بر این است که داده‌های alldat از قبل در کولب بارگذاری شده‌اند
+for subj_id, face_chans in subjects_electrodes.items():
+    # دریافت داده‌های سوژه (کاهش یک واحد برای ایندکس 0)
+    dat = alldat[subj_id - 1]
+
+    # چک کردن وجود داده‌های رفتاری key_press
+    if 'key_press' not in dat[1] or dat[1]['key_press'] is None:
+        print(f"Subject {subj_id} has no key-press data. Skipping...")
+        continue
+
+    # استخراج متغیرهای مورد نیاز از ساختار داده Neuromatch
+    raw_v_data = dat[1]['V'] # Continuous voltage data (timepoints, channels)
+    t_on = dat[1]['t_on'].flatten() # Stimulus onset times for epoching
+    raw_key_press_times = dat[1]['key_press'].flatten() # Raw timestamps of key presses
+    noise_levels = dat[1]['stim_noise'].flatten() # Noise levels per trial
+    srate = 1000 # Assuming srate is 1000 Hz, consistent with dataset info
+
+    # Define epoch window (e.g., -200ms to +800ms around stimulus onset)
+    pre_stim_ms = 200
+    post_stim_ms = 800
+    pre_stim_samples = int(pre_stim_ms * (srate / 1000))
+    post_stim_samples = int(post_stim_ms * (srate / 1000))
+    epoch_length_samples = pre_stim_samples + post_stim_samples + 1
+
+    n_trials = len(t_on)
+    n_channels = raw_v_data.shape[1]
+
+    # Prepare array for epoched data (trials, channels, timepoints_in_epoch)
+    epoched_v_data = np.zeros((n_trials, n_channels, epoch_length_samples), dtype=raw_v_data.dtype)
+
+    # Epoch the continuous data
+    for i, onset_sample in enumerate(t_on):
+        start_idx = int(onset_sample - pre_stim_samples)
+        end_idx = int(onset_sample + post_stim_samples + 1)
+
+        # Ensure indices are within bounds of raw_v_data
+        if start_idx >= 0 and end_idx <= raw_v_data.shape[0]:
+            epoched_v_data[i, :, :] = raw_v_data[start_idx:end_idx, :].T
+        else:
+            # Handle trials that are too close to the beginning or end of the recording
+            print(f"Warning: Trial {i} for Subject {subj_id} falls out of bounds. This trial will be zero-padded.")
+
+    # Create a time vector for the epoched data for plotting
+    time_vec = np.linspace(-pre_stim_ms / 1000, post_stim_ms / 1000, epoch_length_samples)
+
+    # Create a binary key_presses array (1 if key pressed for trial, 0 otherwise)
+    key_presses_binary = np.zeros(n_trials, dtype=int)
+    for trial_idx, onset_time in enumerate(t_on):
+        # For Experiment 2, t_off is 1000 samples after t_on. Use this as response window.
+        response_start = onset_time
+        response_end = onset_time + 1000
+
+        # Check if any raw key press time falls within this trial's response window
+        if np.any((raw_key_press_times >= response_start) & (raw_key_press_times < response_end)):
+            key_presses_binary[trial_idx] = 1
+
+    # فراخوانی تابع برای رسم نمودار
+    plot_perceived_vs_nonperceived(
+        subj_data=epoched_v_data,
+        key_presses=key_presses_binary, # Use the new binary array
+        noise_levels=noise_levels,
+        time_vec=time_vec,
+        face_channels=face_chans,
+        subj_id=subj_id
+    )
